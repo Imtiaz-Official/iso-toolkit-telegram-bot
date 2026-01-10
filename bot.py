@@ -18,9 +18,17 @@ from telegram.ext import (
 import aiohttp
 
 # Configuration from environment variables
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8389164068:AAETshGIFZc1Y-YARL59HT73bX4esBTTJKo")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TARGET_URL = os.getenv("TARGET_URL", "https://iso-toolkit.onrender.com/")
 PING_INTERVAL = 600  # 10 minutes in seconds
+
+# Validate required environment variables
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError(
+        "TELEGRAM_BOT_TOKEN environment variable is required! "
+        "Set it in your deployment platform or run: "
+        "export TELEGRAM_BOT_TOKEN=your_token_here"
+    )
 
 # Enable logging
 logging.basicConfig(
