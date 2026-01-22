@@ -585,7 +585,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"⚠️ Could not auto-match this file to any ISO."
                 )
 
-            logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} ({speed_text}, {elapsed:.1f)s)")
+            logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} - {speed_text}, {elapsed:.1f}s")
 
         except Exception as inner_e:
             # Clean up temp file if it exists
