@@ -384,15 +384,33 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"🔗 Ready for download!"
             )
         else:
-            # Uploaded but not matched
-            await msg.edit_text(
-                f"✅ Upload successful!\n\n"
-                f"📁 File: {filename}\n"
-                f"📏 Size: {format_size(file_size)}\n"
-                f"🌐 Platform: {platform.upper()}\n\n"
-                f"⚠️ Could not auto-match this file to any ISO.\n"
-                f"You can manually link it in the admin panel."
-            )
+            # Uploaded but not matched - show direct link
+            download_url = result.get("download_url", "")
+            view_url = result.get("view_url", "")
+
+            if download_url:
+                link_msg = f"⬇️ Direct: {download_url}\n"
+                if view_url:
+                    link_msg += f"🔗 View: {view_url}"
+
+                await msg.edit_text(
+                    f"✅ Upload successful!\n\n"
+                    f"📁 File: {filename}\n"
+                    f"📏 Size: {format_size(file_size)}\n"
+                    f"🌐 Platform: {platform.upper()}\n\n"
+                    f"{link_msg}\n\n"
+                    f"⚠️ Could not auto-match this file to any ISO.\n"
+                    f"You can manually link it in the admin panel."
+                )
+            else:
+                await msg.edit_text(
+                    f"✅ Upload successful!\n\n"
+                    f"📁 File: {filename}\n"
+                    f"📏 Size: {format_size(file_size)}\n"
+                    f"🌐 Platform: {platform.upper()}\n\n"
+                    f"⚠️ Could not auto-match this file to any ISO.\n"
+                    f"You can manually link it in the admin panel."
+                )
 
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)}")
@@ -569,7 +587,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"💿 Architecture: {iso_info.get('architecture', 'N/A')}\n\n"
                     f"🌐 Platform: PIXELDRAIN\n"
                     f"🆔 ISO ID: {iso_id}\n"
-                    f"🔗 {view_url}\n\n"
+                    f"🔗 View: {view_url}\n"
+                    f"⬇️ Direct: {download_url}\n\n"
                     f"Ready for download!"
                 )
             else:
@@ -581,7 +600,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"⏱️ Time: {elapsed:.1f}s\n\n"
                     f"🌐 Platform: PIXELDRAIN\n"
                     f"🆔 ID: {file_id}\n"
-                    f"🔗 {view_url}\n\n"
+                    f"🔗 View: {view_url}\n"
+                    f"⬇️ Direct: {download_url}\n\n"
                     f"⚠️ Could not auto-match this file to any ISO."
                 )
 
