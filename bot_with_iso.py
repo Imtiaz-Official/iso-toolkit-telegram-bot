@@ -464,7 +464,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
 
         # Step 2: Stream upload with progress tracking
-        credentials = base64.b64.encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
+        credentials = base64.b64encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
         headers_pd = {"Authorization": f"Basic {credentials}"}
 
         # For progress tracking
