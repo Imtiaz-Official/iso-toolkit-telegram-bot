@@ -30,7 +30,14 @@ API_KEY = os.getenv("API_KEY", "")
 PIXELDRAIN_API_KEY = os.getenv("PIXELDRAIN_API_KEY", "")
 PING_INTERVAL = 600  # 10 minutes
 
-# Admin chat IDs (comma-separated)
+# ============================================================================
+# ACCESS CONTROL
+# ============================================================================
+
+# Owner ID - Only person who can use the bot initially
+OWNER_ID = 1851080851
+
+# Admin chat IDs (comma-separated) - DEPRECATED, use ALLOWED_USERS instead
 ADMIN_IDS = set()
 if admin_ids_str := os.getenv("ADMIN_CHAT_IDS", ""):
     ADMIN_IDS = set(int(x.strip()) for x in admin_ids_str.split(",") if x.strip())
@@ -68,14 +75,21 @@ async def ping_site() -> tuple[bool, str, int]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show welcome message."""
     user = update.effective_user
-    is_admin = update.effective_user.id in ADMIN_IDS if ADMIN_IDS else False
+    user_id = user.id
 
-    msg = f"""
-👋 Hi {user.first_name}!
+    # Check authorization
+    if not is_authorized(update, context):
+        # Silently ignore unauthorized users
+        return
+
+    is_owner = user_id == OWNER_ID
+    is_admin = user_id in ADMIN_IDS if ADMIN_IDS else False
+
+    msg = f"""👋 Hi {user.first_name}!
 
 I'm your ISO Toolkit bot.
 
-{'🔐 **Admin Mode**' if is_admin else ''}
+{'👑 **Owner Mode**' if is_owner else ('🔐 **Admin Mode**' if is_admin else '')}
 
 **Commands:**
 /check - Check site status
@@ -83,7 +97,7 @@ I'm your ISO Toolkit bot.
 /status - Show status
 /stats - Show statistics
 
-**ISO Hosting (Admin only):**
+**ISO Hosting:**
 /upload - Upload ISO (reply to file)
 /fetch - Fetch from URL & host (streaming)
 /folder_create - Create folder on PixelDrain
@@ -91,15 +105,22 @@ I'm your ISO Toolkit bot.
 /folder_set - Set current folder for uploads
 /info - Get file info (reply to file)
 /list - List hosted ISOs
-/help - Show help
+
+**Permission Management (Owner only):**
+/allow <user_id> - Grant access to a user
+/deny <user_id> - Revoke access from a user
+/users - List all authorized users
 
 ⏰ Auto-ping every 10 min.
-    """
+"""
     await update.message.reply_text(msg)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if site is online."""
+    if not is_authorized(update, context):
+        return  # Silently ignore
+
     msg = await update.message.reply_text("🔍 Checking...")
 
     success, message, status_code = await ping_site()
@@ -124,10 +145,33 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ============================================================================
 
 def is_admin(update: Update) -> bool:
-    """Check if user is admin."""
+    """Check if user is admin (DEPRECATED - use is_authorized instead)."""
     if not ADMIN_IDS:
         return True  # No restrictions if no admin IDs set
     return update.effective_user.id in ADMIN_IDS
+
+
+def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Check if user is authorized to use the bot.
+
+    Owner (1851080851) and users explicitly allowed by owner can use the bot.
+    Unauthorized users receive no response (silent ignore).
+    """
+    user_id = update.effective_user.id
+
+    # Owner always authorized
+    if user_id == OWNER_ID:
+        return True
+
+    # Check if user is in allowed list (stored in bot_data)
+    allowed_users = context.bot_data.get('allowed_users', set())
+    if user_id in allowed_users:
+        return True
+
+    # Unauthorized - log and return False
+    logger.info(f"Unauthorized access attempt by user_id: {user_id}, username: {update.effective_user.username}")
+    return False
 
 
 def format_size(bytes: int) -> str:
@@ -218,9 +262,8 @@ async def register_iso_with_server(
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ISO upload - reply to a document."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only command")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     # Check if replying to a document
     if not update.message.reply_to_message:
@@ -350,9 +393,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     Usage: /fetch <url> <name> <version> <arch>
     Example: /fetch https://example.com/win10.iso Windows 10 22H2 x64
     """
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only command")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     args = context.args
 
@@ -528,9 +570,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get file info."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     if not update.message.reply_to_message or not update.message.reply_to_message.document:
         await update.message.reply_text("📎 Reply to a file to get info.")
@@ -556,9 +597,8 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List hosted ISOs."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     if not API_KEY:
         await update.message.reply_text("⚠️ No API_KEY configured")
@@ -617,9 +657,8 @@ async def auto_ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def folder_create_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Create a new folder on PixelDrain."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only command")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     if not PIXELDRAIN_API_KEY:
         await update.message.reply_text("⚠️ PIXELDRAIN_API_KEY not configured")
@@ -672,9 +711,8 @@ async def folder_create_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def folder_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all folders on PixelDrain."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only command")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     user_id = update.effective_user.id
 
@@ -699,9 +737,8 @@ async def folder_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def folder_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Set the current active folder for uploads."""
-    if not is_admin(update):
-        await update.message.reply_text("❌ Admin only command")
-        return
+    if not is_authorized(update, context):
+        return  # Silently ignore
 
     if not context.args:
         # Show current folder
@@ -748,6 +785,139 @@ async def folder_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ============================================================================
+# PERMISSION MANAGEMENT (Owner Only)
+# ============================================================================
+
+async def allow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Allow a user to access the bot. Owner only.
+
+    Usage: /allow <user_id>
+    Example: /allow 123456789
+    """
+    user_id = update.effective_user.id
+
+    # Only owner can manage permissions
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Owner only command")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "🔓 Grant access to a user\n\n"
+            "Usage: /allow <user_id>\n\n"
+            "Example: /allow 123456789\n\n"
+            "Get user ID from: @userinfobot or forward their message"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        return
+
+    # Initialize allowed_users set if not exists
+    if 'allowed_users' not in context.bot_data:
+        context.bot_data['allowed_users'] = set()
+
+    allowed_users = context.bot_data['allowed_users']
+
+    # Check if already allowed
+    if target_user_id in allowed_users:
+        await update.message.reply_text(f"✅ User {target_user_id} is already authorized.")
+        return
+
+    # Add to allowed list
+    allowed_users.add(target_user_id)
+    context.bot_data['allowed_users'] = allowed_users
+
+    await update.message.reply_text(
+        f"✅ User {target_user_id} has been granted access.\n\n"
+        f"Total authorized users: {len(allowed_users) + 1}"  # +1 for owner
+    )
+
+    logger.info(f"Owner {user_id} granted access to user {target_user_id}")
+
+
+async def deny_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Revoke access from a user. Owner only.
+
+    Usage: /deny <user_id>
+    Example: /deny 123456789
+    """
+    user_id = update.effective_user.id
+
+    # Only owner can manage permissions
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Owner only command")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "🔒 Revoke access from a user\n\n"
+            "Usage: /deny <user_id>\n\n"
+            "Example: /deny 123456789"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        return
+
+    # Cannot deny owner
+    if target_user_id == OWNER_ID:
+        await update.message.reply_text("❌ Cannot revoke owner's access.")
+        return
+
+    allowed_users = context.bot_data.get('allowed_users', set())
+
+    # Check if user is allowed
+    if target_user_id not in allowed_users:
+        await update.message.reply_text(f"❌ User {target_user_id} is not in the allowed list.")
+        return
+
+    # Remove from allowed list
+    allowed_users.remove(target_user_id)
+    context.bot_data['allowed_users'] = allowed_users
+
+    await update.message.reply_text(
+        f"✅ Access revoked from user {target_user_id}.\n\n"
+        f"Total authorized users: {len(allowed_users) + 1}"  # +1 for owner
+    )
+
+    logger.info(f"Owner {user_id} revoked access from user {target_user_id}")
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all authorized users. Owner only."""
+    user_id = update.effective_user.id
+
+    # Only owner can view users
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Owner only command")
+        return
+
+    allowed_users = context.bot_data.get('allowed_users', set())
+
+    msg = f"👥 Authorized Users\n\n"
+    msg += f"👑 Owner: {OWNER_ID}\n\n"
+
+    if allowed_users:
+        msg += f"✅ Allowed users ({len(allowed_users)}):\n"
+        for uid in sorted(allowed_users):
+            msg += f"   • {uid}\n"
+    else:
+        msg += "✅ No additional users allowed.\n"
+        msg += "Use /allow <user_id> to grant access."
+
+    await update.message.reply_text(msg)
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -755,6 +925,7 @@ def main():
     """Start the bot."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.bot_data['stats'] = {'total': 0, 'success': 0, 'failed': 0}
+    application.bot_data['allowed_users'] = set()  # Initialize allowed users set
 
     # Keep-alive commands
     application.add_handler(CommandHandler("start", start_command))
@@ -773,6 +944,11 @@ def main():
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("list", list_command))
 
+    # Permission management commands (Owner only)
+    application.add_handler(CommandHandler("allow", allow_command))
+    application.add_handler(CommandHandler("deny", deny_command))
+    application.add_handler(CommandHandler("users", users_command))
+
     # Auto-ping job
     application.job_queue.run_repeating(
         auto_ping_job,
@@ -782,7 +958,8 @@ def main():
 
     logger.info("Bot started with ISO hosting support!")
     logger.info(f"Target: {TARGET_URL}")
-    logger.info(f"Admin IDs: {ADMIN_IDS if ADMIN_IDS else 'None (open)'}")
+    logger.info(f"Owner ID: {OWNER_ID}")
+    logger.info(f"Admin IDs: {ADMIN_IDS if ADMIN_IDS else 'None (using access control)'}")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
