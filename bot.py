@@ -1,18 +1,22 @@
 """
 Telegram bot to keep Render site alive with auto-ping and manual controls.
+Plus ISO file hosting functionality.
 """
 
 import asyncio
 import logging
 import os
+import json
 from datetime import datetime
-from typing import Final
+from typing import Final, Optional
 
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 import aiohttp
@@ -20,6 +24,8 @@ import aiohttp
 # Configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TARGET_URL = os.getenv("TARGET_URL", "https://iso-toolkit.onrender.com/")
+API_URL = os.getenv("API_URL", "https://iso-toolkit.onrender.com/api")
+API_KEY = os.getenv("API_KEY", "")  # API key for authentication
 PING_INTERVAL = 600  # 10 minutes in seconds
 
 # Validate required environment variables
@@ -36,6 +42,11 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# Admin user IDs (comma-separated in env)
+ADMIN_IDS = set()
+if admin_ids_str := os.getenv("ADMIN_CHAT_IDS", ""):
+    ADMIN_IDS = set(int(x.strip()) for x in admin_ids_str.split(",") if x.strip())
 
 
 async def ping_site() -> tuple[bool, str, int]:
@@ -65,16 +76,23 @@ async def ping_site() -> tuple[bool, str, int]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
+    is_admin = update.effective_user.id in ADMIN_IDS if ADMIN_IDS else False
+
     welcome_message = f"""
 👋 Hi {user.first_name}!
 
-I'm your ISO Toolkit keep-alive bot.
+I'm your ISO Toolkit bot.
+
+{'🔐 **Admin Mode Enabled**' if is_admin else ''}
 
 🤖 Commands:
 /check - Check if site is online
 /wake - Wake up the site
 /status - Show bot status
 /stats - Show ping statistics
+{'/upload - Upload an ISO file (reply to file)' if is_admin else ''}
+{'/list - List hosted ISOs' if is_admin else ''}
+{'/info - Get ISO file info (reply to file)' if is_admin else ''}
 /help - Show this help message
 
 ⏰ I'll automatically ping the site every 10 minutes to keep it alive.
