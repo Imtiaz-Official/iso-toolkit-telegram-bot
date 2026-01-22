@@ -352,17 +352,20 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     doc = update.message.reply_to_message.document
 
+    # Truncate file ID for display to avoid Markdown parsing issues
+    file_id_short = doc.file_id[:30] + "..." if len(doc.file_id) > 30 else doc.file_id
+
     info = f"""
-📄 **File Information**
+📄 File Information
 
 📁 Name: {doc.file_name}
 📏 Size: {format_size(doc.file_size)}
-🆔 File ID: `{doc.file_id}`
+🆔 File ID: {file_id_short}
 📊 MIME Type: {doc.mime_type}
 
 📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     """
-    await update.message.reply_text(info, parse_mode="Markdown")
+    await update.message.reply_text(info)  # Removed parse_mode to avoid Markdown errors
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -390,7 +393,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         await update.message.reply_text("📭 No hosted ISOs found.")
                         return
 
-                    msg = "📦 **Hosted ISOs:**\n\n"
+                    msg = "📦 Hosted ISOs:\n\n"
                     for iso in isos[:10]:  # Limit to 10
                         msg += f"• {iso.get('name', 'Unknown')} ({iso.get('platform', 'unknown')})\n"
                         msg += f"  {format_size(iso.get('file_size', 0))}\n"
@@ -398,7 +401,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     if len(isos) > 10:
                         msg += f"\n... and {len(isos) - 10} more"
 
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    await update.message.reply_text(msg)  # Removed parse_mode to avoid Markdown errors
                 else:
                     await update.message.reply_text(f"❌ Server error: HTTP {response.status}")
     except Exception as e:
