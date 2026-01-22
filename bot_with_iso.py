@@ -4,6 +4,7 @@ Features: Keep-alive pings + ISO file hosting (Telegram + PixelDrain)
 """
 
 import asyncio
+import json
 import logging
 import os
 import base64
@@ -207,7 +208,9 @@ async def upload_to_pixeldrain(
                     timeout=aiohttp.ClientTimeout(total=3600)
                 ) as response:
                     if response.status in [200, 201]:  # Accept both 200 and 201
-                        result = await response.json()
+                        # PixelDrain returns text/plain, parse as JSON manually
+                        response_text = await response.text()
+                        result = json.loads(response_text)
                         file_id = result.get("id")
                         return {
                             "success": True,
@@ -512,7 +515,9 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     elapsed = (datetime.now() - start_time).total_seconds()
 
                     if pd_response.status in [200, 201]:
-                        result = await pd_response.json()
+                        # PixelDrain returns text/plain, parse as JSON manually
+                        response_text = await pd_response.text()
+                        result = json.loads(response_text)
                         file_id = result.get("id")
                         download_url = f"https://pixeldrain.com/api/file/{file_id}"
                         view_url = f"https://pixeldrain.com/u/{file_id}"
