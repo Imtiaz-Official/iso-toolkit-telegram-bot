@@ -85,7 +85,8 @@ I'm your ISO Toolkit bot.
 /stats - Show statistics
 
 **ISO Hosting (Admin only):**
-/upload - Upload ISO to host (reply to file)
+/upload - Upload ISO (reply to file)
+/fetch - Fetch from URL & host (streaming)
 /info - Get file info (reply to file)
 /list - List hosted ISOs
 /help - Show help
@@ -340,6 +341,171 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"Upload error: {e}", exc_info=True)
 
 
+async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Fetch ISO from URL and stream directly to PixelDrain (no disk storage).
+
+    Usage: /fetch <url> <name> <version> <arch>
+    Example: /fetch https://example.com/win10.iso Windows 10 22H2 x64
+    """
+    if not is_admin(update):
+        await update.message.reply_text("❌ Admin only command")
+        return
+
+    args = context.args
+
+    if len(args) < 4:
+        await update.message.reply_text(
+            "📥 Fetch ISO from URL\n\n"
+            "Usage: /fetch <url> <name> <version> <arch>\n\n"
+            "Example:\n"
+            "/fetch https://example.com/windows10.iso Windows 10 22H2 x64\n\n"
+            "The file will be streamed directly to PixelDrain (no disk storage)."
+        )
+        return
+
+    url = args[0]
+    name = args[1]
+    version = args[2]
+    arch = args[3]
+
+    # Validate URL
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text("❌ Invalid URL. Must start with http:// or https://")
+        return
+
+    msg = await update.message.reply_text(
+        f"📥 Fetching from URL...\n\n"
+        f"URL: {url[:60]}{'...' if len(url) > 60 else ''}\n"
+        f"Target: PixelDrain\n\n"
+        f"⏳ Starting..."
+    )
+
+    try:
+        if not PIXELDRAIN_API_KEY:
+            await msg.edit_text(
+                "⚠️ PIXELDRAIN_API_KEY not configured!\n\n"
+                "This feature requires PixelDrain for hosting.\n"
+                "Get your API key from: https://pixeldrain.com/user/settings"
+            )
+            return
+
+        # Step 1: Get file info from URL (HEAD request for size)
+        await msg.edit_text(f"📡 Checking URL...\n\n{url[:60]}{'...' if len(url) > 60 else ''}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.head(
+                url,
+                timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=True
+            ) as response:
+                if response.status != 200:
+                    await msg.edit_text(f"❌ URL returned HTTP {response.status}")
+                    return
+
+                content_length = response.headers.get('Content-Length')
+                file_size = int(content_length) if content_length else None
+
+                # Get filename from URL if available
+                filename = url.split('/')[-1].split('?')[0] or f"{name}_{version}_{arch}.iso"
+
+                if file_size:
+                    size_gb = file_size / (1024**3)
+                    await msg.edit_text(
+                        f"📡 File found!\n\n"
+                        f"📁 Name: {filename}\n"
+                        f"📏 Size: {format_size(file_size)} ({size_gb:.2f} GB)\n\n"
+                        f"☁️ Streaming to PixelDrain...\n\n"
+                        f"This may take a while for large files..."
+                    )
+                else:
+                    await msg.edit_text(
+                        f"📡 File found!\n\n"
+                        f"📁 Name: {filename}\n"
+                        f"☁️ Streaming to PixelDrain...\n\n"
+                        f"Size: Unknown (proceeding...)"
+                    )
+
+        # Step 2: Stream upload to PixelDrain (no disk storage!)
+        credentials = base64.b64encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
+        headers_pd = {"Authorization": f"Basic {credentials}"}
+
+        async with aiohttp.ClientSession() as session:
+            # Download from URL and upload to PixelDrain in one stream
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=3600)  # 1 hour timeout
+            ) as download_response:
+                if download_response.status != 200:
+                    await msg.edit_text(f"❌ Download failed: HTTP {download_response.status}")
+                    return
+
+                # Prepare multipart upload to PixelDrain
+                data = aiohttp.FormData()
+
+                # Stream the file content
+                data.add_field(
+                    "file",
+                    download_response.content,
+                    filename=filename,
+                    content_type="application/octet-stream"
+                )
+
+                # Upload to PixelDrain
+                async with session.post(
+                    "https://pixeldrain.com/api/file",
+                    data=data,
+                    headers=headers_pd,
+                    timeout=aiohttp.ClientTimeout(total=3600)
+                ) as pd_response:
+                    if pd_response.status == 200:
+                        result = await pd_response.json()
+
+                        file_id = result.get("id")
+                        download_url = f"https://pixeldrain.com/api/file/{file_id}"
+                        view_url = f"https://pixeldrain.com/u/{file_id}"
+
+                        # Generate ISO ID
+                        iso_id = f"pixeldrain_{name.lower().replace(' ', '_')}_{version.lower().replace(' ', '_')}_{arch.lower()}"
+
+                        # Register with server (if API_KEY available)
+                        if API_KEY:
+                            await register_iso_with_server(
+                                iso_id=iso_id,
+                                platform="pixeldrain",
+                                file_id=file_id,
+                                download_url=download_url,
+                                name=filename,
+                                size=result.get("size", file_size or 0)
+                            )
+
+                        await msg.edit_text(
+                            f"✅ Fetch & Upload successful!\n\n"
+                            f"📁 File: {filename}\n"
+                            f"📏 Size: {format_size(result.get('size', file_size or 0))}\n"
+                            f"🌐 Platform: PIXELDRAIN\n"
+                            f"🆔 File ID: {file_id}\n\n"
+                            f"🔗 Download: {view_url}\n\n"
+                            f"Registered as: {iso_id}"
+                        )
+
+                        logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename}")
+                    else:
+                        error_text = await pd_response.text()
+                        await msg.edit_text(
+                            f"❌ PixelDrain upload failed:\n"
+                            f"HTTP {pd_response.status}\n\n"
+                            f"{error_text[:200]}"
+                        )
+
+    except asyncio.TimeoutError:
+        await msg.edit_text("❌ Timeout: Download took too long")
+        logger.error(f"Fetch timeout for URL: {url}")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+        logger.error(f"Fetch error: {e}", exc_info=True)
+
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get file info."""
     if not is_admin(update):
@@ -444,6 +610,7 @@ def main():
 
     # ISO hosting commands
     application.add_handler(CommandHandler("upload", upload_command))
+    application.add_handler(CommandHandler("fetch", fetch_command))
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("list", list_command))
 
