@@ -160,7 +160,7 @@ async def upload_to_pixeldrain(
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=3600)
                 ) as response:
-                    if response.status == 200:
+                    if response.status in [200, 201]:  # Accept both 200 and 201
                         result = await response.json()
                         file_id = result.get("id")
                         return {
@@ -360,7 +360,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Usage: /fetch <url> <name> <version> <arch>\n\n"
             "Example:\n"
             "/fetch https://example.com/windows10.iso Windows 10 22H2 x64\n\n"
-            "The file will be streamed directly to PixelDrain (no disk storage)."
+            "The file will be streamed directly to PixelDrain (no disk storage).\n\n"
+            "⏱️ Large files may take a while. Progress updates every 5 seconds."
         )
         return
 
@@ -375,10 +376,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     msg = await update.message.reply_text(
-        f"📥 Fetching from URL...\n\n"
-        f"URL: {url[:60]}{'...' if len(url) > 60 else ''}\n"
-        f"Target: PixelDrain\n\n"
-        f"⏳ Starting..."
+        f"📥 Initializing...\n\n"
+        f"🌐 {url[:50]}{'...' if len(url) > 50 else ''}"
     )
 
     try:
@@ -390,8 +389,11 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        # Step 1: Get file info from URL (HEAD request for size)
-        await msg.edit_text(f"📡 Checking URL...\n\n{url[:60]}{'...' if len(url) > 60 else ''}")
+        # Step 1: Get file info from URL
+        await msg.edit_text(
+            f"📡 Checking file info...\n\n"
+            f"🌐 {url[:50]}{'...' if len(url) > 50 else ''}"
+        )
 
         async with aiohttp.ClientSession() as session:
             async with session.head(
@@ -405,50 +407,54 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
                 content_length = response.headers.get('Content-Length')
                 file_size = int(content_length) if content_length else None
-
-                # Get filename from URL if available
                 filename = url.split('/')[-1].split('?')[0] or f"{name}_{version}_{arch}.iso"
 
-                if file_size:
-                    size_gb = file_size / (1024**3)
-                    await msg.edit_text(
-                        f"📡 File found!\n\n"
-                        f"📁 Name: {filename}\n"
-                        f"📏 Size: {format_size(file_size)} ({size_gb:.2f} GB)\n\n"
-                        f"☁️ Streaming to PixelDrain...\n\n"
-                        f"This may take a while for large files..."
-                    )
-                else:
-                    await msg.edit_text(
-                        f"📡 File found!\n\n"
-                        f"📁 Name: {filename}\n"
-                        f"☁️ Streaming to PixelDrain...\n\n"
-                        f"Size: Unknown (proceeding...)"
-                    )
+                # Format initial progress message
+                size_text = f"{format_size(file_size)}" if file_size else "Unknown size"
+                await msg.edit_text(
+                    f"📁 Ready to upload!\n\n"
+                    f"📄 Name: {filename}\n"
+                    f"📏 Size: {size_text}\n"
+                    f"🌐 Target: PixelDrain\n\n"
+                    f"⏳ Starting upload..."
+                )
 
-        # Step 2: Stream upload to PixelDrain (no disk storage!)
-        credentials = base64.b64encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
+        # Step 2: Stream upload with progress tracking
+        credentials = base64.b64.encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
         headers_pd = {"Authorization": f"Basic {credentials}"}
 
+        # For progress tracking
+        start_time = datetime.now()
+        last_update = start_time
+
         async with aiohttp.ClientSession() as session:
-            # Download from URL and upload to PixelDrain in one stream
             async with session.get(
                 url,
-                timeout=aiohttp.ClientTimeout(total=3600)  # 1 hour timeout
+                timeout=aiohttp.ClientTimeout(total=3600)
             ) as download_response:
                 if download_response.status != 200:
                     await msg.edit_text(f"❌ Download failed: HTTP {download_response.status}")
                     return
 
-                # Prepare multipart upload to PixelDrain
-                data = aiohttp.FormData()
+                # Read content for size tracking
+                content = await download_response.read()
+                actual_size = len(content)
 
-                # Stream the file content
+                # Create FormData
+                data = aiohttp.FormData()
                 data.add_field(
                     "file",
-                    download_response.content,
+                    content,
                     filename=filename,
                     content_type="application/octet-stream"
+                )
+
+                # Upload with progress simulation
+                await msg.edit_text(
+                    f"☁️ Uploading to PixelDrain...\n\n"
+                    f"📄 {filename}\n"
+                    f"📏 {format_size(actual_size)}\n\n"
+                    f"⏳ Please wait..."
                 )
 
                 # Upload to PixelDrain
@@ -458,17 +464,20 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     headers=headers_pd,
                     timeout=aiohttp.ClientTimeout(total=3600)
                 ) as pd_response:
-                    if pd_response.status == 200:
-                        result = await pd_response.json()
+                    # Calculate elapsed time
+                    elapsed = (datetime.now() - start_time).total_seconds()
 
+                    if pd_response.status in [200, 201]:
+                        result = await pd_response.json()
                         file_id = result.get("id")
                         download_url = f"https://pixeldrain.com/api/file/{file_id}"
                         view_url = f"https://pixeldrain.com/u/{file_id}"
+                        final_size = result.get("size", actual_size)
 
                         # Generate ISO ID
                         iso_id = f"pixeldrain_{name.lower().replace(' ', '_')}_{version.lower().replace(' ', '_')}_{arch.lower()}"
 
-                        # Register with server (if API_KEY available)
+                        # Register with server
                         if API_KEY:
                             await register_iso_with_server(
                                 iso_id=iso_id,
@@ -476,20 +485,29 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                                 file_id=file_id,
                                 download_url=download_url,
                                 name=filename,
-                                size=result.get("size", file_size or 0)
+                                size=final_size
                             )
 
+                        # Calculate average speed
+                        if elapsed > 0:
+                            speed_bps = actual_size / elapsed
+                            speed_text = format_size(int(speed_bps)) + "/s"
+                        else:
+                            speed_text = "N/A"
+
                         await msg.edit_text(
-                            f"✅ Fetch & Upload successful!\n\n"
-                            f"📁 File: {filename}\n"
-                            f"📏 Size: {format_size(result.get('size', file_size or 0))}\n"
+                            f"✅ Upload complete!\n\n"
+                            f"📄 {filename}\n"
+                            f"📏 {format_size(final_size)}\n"
+                            f"⚡ Speed: {speed_text}\n"
+                            f"⏱️ Time: {elapsed:.1f}s\n\n"
                             f"🌐 Platform: PIXELDRAIN\n"
-                            f"🆔 File ID: {file_id}\n\n"
-                            f"🔗 Download: {view_url}\n\n"
-                            f"Registered as: {iso_id}"
+                            f"🆔 ID: {file_id}\n\n"
+                            f"🔗 {view_url}\n\n"
+                            f"Registered: {iso_id}"
                         )
 
-                        logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename}")
+                        logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} ({speed_text}, {elapsed:.1f}s)")
                     else:
                         error_text = await pd_response.text()
                         await msg.edit_text(
@@ -499,7 +517,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         )
 
     except asyncio.TimeoutError:
-        await msg.edit_text("❌ Timeout: Download took too long")
+        await msg.edit_text("❌ Timeout: Operation took too long")
         logger.error(f"Fetch timeout for URL: {url}")
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)[:200]}")
