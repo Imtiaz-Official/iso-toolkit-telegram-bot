@@ -475,118 +475,123 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"⏳ Starting upload..."
                 )
 
-        # Step 2: Stream upload with progress tracking
-        credentials = base64.b64encode(f":{PIXELDRAIN_API_KEY}".encode()).decode()
-        headers_pd = {"Authorization": f"Basic {credentials}"}
-
-        # For progress tracking
+        # Step 2: Download to temp file, then upload to PixelDrain
+        # This approach is more reliable for large files on Render's limited memory
         start_time = datetime.now()
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=3600)
-            ) as download_response:
-                if download_response.status != 200:
-                    await msg.edit_text(f"❌ Download failed: HTTP {download_response.status}")
-                    return
+        # Download to temp file with progress
+        await msg.edit_text(
+            f"⬇️ Downloading from URL...\n\n"
+            f"📄 {filename}\n"
+            f"📏 {size_text}\n\n"
+            f"⏳ Please wait..."
+        )
 
-                # Read content for size tracking
-                content = await download_response.read()
-                actual_size = len(content)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".iso")
+        temp_path = temp_file.name
+        temp_file.close()
 
-                # Create FormData
-                data = aiohttp.FormData()
-                data.add_field(
-                    "file",
-                    content,
-                    filename=filename,
-                    content_type="application/octet-stream"
-                )
+        try:
+            # Download the file
+            downloaded_size = 0
+            chunk_size = 1024 * 1024  # 1MB chunks
 
-                # Upload with progress simulation
-                await msg.edit_text(
-                    f"☁️ Uploading to PixelDrain...\n\n"
-                    f"📄 {filename}\n"
-                    f"📏 {format_size(actual_size)}\n\n"
-                    f"⏳ Please wait..."
-                )
-
-                # Upload to PixelDrain
-                async with session.post(
-                    "https://pixeldrain.com/api/file",
-                    data=data,
-                    headers=headers_pd,
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
                     timeout=aiohttp.ClientTimeout(total=3600)
-                ) as pd_response:
-                    # Calculate elapsed time
-                    elapsed = (datetime.now() - start_time).total_seconds()
+                ) as download_response:
+                    if download_response.status != 200:
+                        await msg.edit_text(f"❌ Download failed: HTTP {download_response.status}")
+                        return
 
-                    if pd_response.status in [200, 201]:
-                        # PixelDrain returns text/plain, parse as JSON manually
-                        response_text = await pd_response.text()
-                        result = json.loads(response_text)
-                        file_id = result.get("id")
-                        download_url = f"https://pixeldrain.com/api/file/{file_id}"
-                        view_url = f"https://pixeldrain.com/u/{file_id}"
-                        final_size = result.get("size", actual_size)
+                    with open(temp_path, 'wb') as f:
+                        async for chunk in download_response.content.iter_chunked(chunk_size):
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
 
-                        # Auto-match with server
-                        await msg.edit_text(f"🔍 Matching ISO with server...")
+            actual_size = downloaded_size
 
-                        match_result = await auto_match_iso_with_server(
-                            file_name=filename,
-                            file_size=final_size,
-                            platform="pixeldrain",
-                            file_id=file_id,
-                            download_url=download_url
-                        )
+            # Upload to PixelDrain
+            await msg.edit_text(
+                f"☁️ Uploading to PixelDrain...\n\n"
+                f"📄 {filename}\n"
+                f"📏 {format_size(actual_size)}\n\n"
+                f"⏳ Please wait..."
+            )
 
-                        # Calculate average speed
-                        if elapsed > 0:
-                            speed_bps = actual_size / elapsed
-                            speed_text = format_size(int(speed_bps)) + "/s"
-                        else:
-                            speed_text = "N/A"
+            result = await upload_to_pixeldrain(temp_path, filename)
 
-                        if match_result.get("success") and match_result.get("iso_id"):
-                            iso_id = match_result["iso_id"]
-                            iso_info = match_result.get("iso_info", {})
+            # Clean up temp file
+            os.unlink(temp_path)
 
-                            await msg.edit_text(
-                                f"✅ Upload complete!\n\n"
-                                f"📄 {filename}\n"
-                                f"📏 {format_size(final_size)}\n"
-                                f"⚡ Speed: {speed_text}\n"
-                                f"⏱️ Time: {elapsed:.1f}s\n\n"
-                                f"🎯 Matched: {iso_info.get('name', 'Unknown')} {iso_info.get('version', '')}\n"
-                                f"💿 Architecture: {iso_info.get('architecture', 'N/A')}\n\n"
-                                f"🌐 Platform: PIXELDRAIN\n"
-                                f"🆔 ISO ID: {iso_id}\n"
-                                f"🔗 {view_url}\n\n"
-                                f"Ready for download!"
-                            )
-                        else:
-                            await msg.edit_text(
-                                f"✅ Upload complete!\n\n"
-                                f"📄 {filename}\n"
-                                f"📏 {format_size(final_size)}\n"
-                                f"⚡ Speed: {speed_text}\n"
-                                f"⏱️ Time: {elapsed:.1f}s\n\n"
-                                f"🌐 Platform: PIXELDRAIN\n"
-                                f"🆔 ID: {file_id}\n"
-                                f"🔗 {view_url}\n\n"
-                                f"⚠️ Could not auto-match this file to any ISO."
-                            )
+            if not result.get("success"):
+                await msg.edit_text(f"❌ Upload failed:\n{result.get('error', 'Unknown error')}")
+                return
 
-                        logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} ({speed_text}, {elapsed:.1f}s)")
-                    else:
-                        error_text = await pd_response.text()
-                        await msg.edit_text(
-                            f"❌ PixelDrain upload failed:\n"
-                            f"HTTP {pd_response.status}\n\n"
-                            f"{error_text[:200]}"
-                        )
+            file_id = result["file_id"]
+            download_url = result["download_url"]
+            view_url = result["view_url"]
+            final_size = result.get("size", actual_size)
+
+            # Calculate elapsed time
+            elapsed = (datetime.now() - start_time).total_seconds()
+
+            # Auto-match with server
+            await msg.edit_text(f"🔍 Matching ISO with server...")
+
+            match_result = await auto_match_iso_with_server(
+                file_name=filename,
+                file_size=final_size,
+                platform="pixeldrain",
+                file_id=file_id,
+                download_url=download_url
+            )
+
+            # Calculate average speed
+            if elapsed > 0:
+                speed_bps = actual_size / elapsed
+                speed_text = format_size(int(speed_bps)) + "/s"
+            else:
+                speed_text = "N/A"
+
+            if match_result.get("success") and match_result.get("iso_id"):
+                iso_id = match_result["iso_id"]
+                iso_info = match_result.get("iso_info", {})
+
+                await msg.edit_text(
+                    f"✅ Upload complete!\n\n"
+                    f"📄 {filename}\n"
+                    f"📏 {format_size(final_size)}\n"
+                    f"⚡ Speed: {speed_text}\n"
+                    f"⏱️ Time: {elapsed:.1f}s\n\n"
+                    f"🎯 Matched: {iso_info.get('name', 'Unknown')} {iso_info.get('version', '')}\n"
+                    f"💿 Architecture: {iso_info.get('architecture', 'N/A')}\n\n"
+                    f"🌐 Platform: PIXELDRAIN\n"
+                    f"🆔 ISO ID: {iso_id}\n"
+                    f"🔗 {view_url}\n\n"
+                    f"Ready for download!"
+                )
+            else:
+                await msg.edit_text(
+                    f"✅ Upload complete!\n\n"
+                    f"📄 {filename}\n"
+                    f"📏 {format_size(final_size)}\n"
+                    f"⚡ Speed: {speed_text}\n"
+                    f"⏱️ Time: {elapsed:.1f}s\n\n"
+                    f"🌐 Platform: PIXELDRAIN\n"
+                    f"🆔 ID: {file_id}\n"
+                    f"🔗 {view_url}\n\n"
+                    f"⚠️ Could not auto-match this file to any ISO."
+                )
+
+            logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} ({speed_text}, {elapsed:.1f)s)")
+
+        except Exception as inner_e:
+            # Clean up temp file if it exists
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise inner_e
 
     except asyncio.TimeoutError:
         await msg.edit_text("❌ Timeout: Operation took too long")
