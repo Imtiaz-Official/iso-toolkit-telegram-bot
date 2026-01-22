@@ -1,13 +1,16 @@
 services:
   - type: worker
     name: iso-toolkit-telegram-bot
-    env: docker
+    env: python
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_with_iso.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false  # Set this in Render dashboard manually
+        sync: false
+      - key: API_URL
+        value: https://iso-toolkit.onrender.com/api
       - key: TARGET_URL
         value: https://iso-toolkit.onrender.com/
-      # Optional: Add your Telegram chat ID to receive failure alerts
-      # - key: OWNER_CHAT_ID
-      #   sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
