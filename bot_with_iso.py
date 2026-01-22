@@ -226,45 +226,62 @@ async def upload_to_pixeldrain(
         return {"success": False, "error": str(e)}
 
 
-async def register_iso_with_server(
-    iso_id: str,
+async def auto_match_iso_with_server(
+    file_name: str,
+    file_size: int,
     platform: str,
     file_id: str,
-    download_url: str,
-    name: str,
-    size: int
-) -> bool:
-    """Register hosted ISO with main server."""
+    download_url: str
+) -> Dict[str, Any]:
+    """
+    Send file info to server for automatic ISO matching.
+
+    Server will search through all providers and find the matching ISO.
+    """
     if not API_KEY:
-        logger.warning("No API_KEY - skipping server registration")
-        return False
+        logger.warning("No API_KEY - skipping server auto-match")
+        return {"success": False, "error": "No API key"}
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{API_URL}/admin/hosted-iso",
+                f"{API_URL}/admin/hosted-iso/auto-match",
                 headers={
                     "Authorization": f"Bearer {API_KEY}",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "iso_id": iso_id,
+                    "file_name": file_name,
+                    "file_size": file_size,
                     "platform": platform,
                     "file_id": file_id,
                     "download_url": download_url,
-                    "file_name": name,
-                    "file_size": size,
                 },
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
-                return response.status == 200
+                if response.status == 200:
+                    result = await response.json()
+                    return {
+                        "success": result.get("matched", False),
+                        "iso_id": result.get("iso_id"),
+                        "message": result.get("message", ""),
+                        "iso_info": result.get("iso_info")
+                    }
+                else:
+                    error_text = await response.text()
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
     except Exception as e:
-        logger.error(f"Failed to register with server: {e}")
-        return False
+        logger.error(f"Failed to auto-match with server: {e}")
+        return {"success": False, "error": str(e)}
 
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ISO upload - reply to a document."""
+    """
+    Handle ISO upload - reply to a document.
+
+    The server will automatically match the file to the correct ISO based on
+    filename and size. No manual parameters needed!
+    """
     if not is_authorized(update, context):
         return  # Silently ignore
 
@@ -272,9 +289,8 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message.reply_to_message:
         await update.message.reply_text(
             "📎 Reply to an ISO file with /upload to host it.\n\n"
-            "Usage: Send an ISO file, then reply to it with:\n"
-            "/upload <name> <version> <arch>\n"
-            "Example: /upload Windows 10 22H2 x64"
+            "The server will automatically detect which ISO it is based on\n"
+            "the filename and size. Just send the file and reply with /upload"
         )
         return
 
@@ -285,31 +301,11 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Not a file. Reply to a document/ISO file.")
         return
 
-    # Parse ISO info from args
-    args = context.args or []
-    if len(args) >= 3:
-        name = args[0]
-        version = args[1]
-        arch = args[2]
-    else:
-        # Try to extract from filename
-        filename = document.file_name
-        name = "Windows"
-        version = "Unknown"
-        arch = "x64"
-        await update.message.reply_text(
-            f"📝 Using defaults:\n"
-            f"Name: {name}\n"
-            f"Version: {version}\n"
-            f"Arch: {arch}\n\n"
-            f"Specify custom: /upload <name> <version> <arch>"
-        )
-
     file_size = document.file_size
-    size_gb = file_size / (1024**3)
+    filename = document.file_name
 
     msg = await update.message.reply_text(
-        f"📦 Processing: {document.file_name}\n"
+        f"📦 Processing: {filename}\n"
         f"📏 Size: {format_size(file_size)}\n\n"
         f"⏳ Starting upload..."
     )
@@ -321,7 +317,7 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if use_pixeldrain and not PIXELDRAIN_API_KEY:
         await msg.edit_text(
-            f"⚠️ File is {size_gb:.1f}GB (>7GB)\n"
+            f"⚠️ File is {file_size / (1024**3):.1f}GB (>7GB)\n"
             f"Requires PixelDrain, but no API key configured.\n\n"
             f"Set PIXELDRAIN_API_KEY environment variable."
         )
@@ -342,7 +338,7 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if use_pixeldrain:
             await msg.edit_text(f"☁️ Uploading to PixelDrain...\n\n"
                                f"This may take a while for large files.")
-            result = await upload_to_pixeldrain(temp_path, document.file_name)
+            result = await upload_to_pixeldrain(temp_path, filename)
             platform = "pixeldrain"
         else:
             await msg.edit_text(f"☁️ Using Telegram hosting...")
@@ -362,27 +358,41 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await msg.edit_text(f"❌ Upload failed:\n{result.get('error', 'Unknown error')}")
             return
 
-        # Generate ISO ID
-        iso_id = f"{platform}_{name.lower().replace(' ', '_')}_{version.lower().replace(' ', '_')}_{arch.lower()}"
+        # Auto-match with server
+        await msg.edit_text(f"🔍 Matching ISO with server...")
 
-        # Register with server
-        await register_iso_with_server(
-            iso_id=iso_id,
+        match_result = await auto_match_iso_with_server(
+            file_name=filename,
+            file_size=file_size,
             platform=platform,
             file_id=result["file_id"],
-            download_url=result.get("download_url", ""),
-            name=document.file_name,
-            size=file_size
+            download_url=result.get("download_url", "")
         )
 
-        await msg.edit_text(
-            f"✅ Upload successful!\n\n"
-            f"📁 File: {document.file_name}\n"
-            f"📏 Size: {format_size(file_size)}\n"
-            f"🌐 Platform: {platform.upper()}\n"
-            f"🆔 ID: {result.get('file_id', 'N/A')[:30]}...\n\n"
-            f"Registered with server as: {iso_id}"
-        )
+        if match_result.get("success") and match_result.get("iso_id"):
+            iso_id = match_result["iso_id"]
+            iso_info = match_result.get("iso_info", {})
+
+            await msg.edit_text(
+                f"✅ Upload successful!\n\n"
+                f"📁 File: {filename}\n"
+                f"📏 Size: {format_size(file_size)}\n"
+                f"🌐 Platform: {platform.upper()}\n\n"
+                f"🎯 Matched: {iso_info.get('name', 'Unknown')} {iso_info.get('version', '')}\n"
+                f"💿 Architecture: {iso_info.get('architecture', 'N/A')}\n\n"
+                f"🆔 ISO ID: {iso_id}\n"
+                f"🔗 Ready for download!"
+            )
+        else:
+            # Uploaded but not matched
+            await msg.edit_text(
+                f"✅ Upload successful!\n\n"
+                f"📁 File: {filename}\n"
+                f"📏 Size: {format_size(file_size)}\n"
+                f"🌐 Platform: {platform.upper()}\n\n"
+                f"⚠️ Could not auto-match this file to any ISO.\n"
+                f"You can manually link it in the admin panel."
+            )
 
     except Exception as e:
         await msg.edit_text(f"❌ Error: {str(e)}")
@@ -393,29 +403,28 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     Fetch ISO from URL and stream directly to PixelDrain (no disk storage).
 
-    Usage: /fetch <url> <name> <version> <arch>
-    Example: /fetch https://example.com/win10.iso Windows 10 22H2 x64
+    Usage: /fetch <url>
+    Example: /fetch https://example.com/windows10.iso
+
+    The server will automatically detect which ISO it is based on filename.
     """
     if not is_authorized(update, context):
         return  # Silently ignore
 
     args = context.args
 
-    if len(args) < 4:
+    if not args:
         await update.message.reply_text(
-            "📥 Fetch ISO from URL\n\n"
-            "Usage: /fetch <url> <name> <version> <arch>\n\n"
+            "📥 Fetch ISO from URL and host on PixelDrain\n\n"
+            "Usage: /fetch <url>\n\n"
             "Example:\n"
-            "/fetch https://example.com/windows10.iso Windows 10 22H2 x64\n\n"
-            "The file will be streamed directly to PixelDrain (no disk storage).\n\n"
-            "⏱️ Large files may take a while. Progress updates every 5 seconds."
+            "/fetch https://example.com/windows10.iso\n\n"
+            "The server will automatically detect which ISO it is.\n\n"
+            "⏱️ Large files may take a while."
         )
         return
 
     url = args[0]
-    name = args[1]
-    version = args[2]
-    arch = args[3]
 
     # Validate URL
     if not url.startswith(('http://', 'https://')):
@@ -454,7 +463,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
                 content_length = response.headers.get('Content-Length')
                 file_size = int(content_length) if content_length else None
-                filename = url.split('/')[-1].split('?')[0] or f"{name}_{version}_{arch}.iso"
+                filename = url.split('/')[-1].split('?')[0] or "unknown.iso"
 
                 # Format initial progress message
                 size_text = f"{format_size(file_size)}" if file_size else "Unknown size"
@@ -472,7 +481,6 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         # For progress tracking
         start_time = datetime.now()
-        last_update = start_time
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -523,19 +531,16 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         view_url = f"https://pixeldrain.com/u/{file_id}"
                         final_size = result.get("size", actual_size)
 
-                        # Generate ISO ID
-                        iso_id = f"pixeldrain_{name.lower().replace(' ', '_')}_{version.lower().replace(' ', '_')}_{arch.lower()}"
+                        # Auto-match with server
+                        await msg.edit_text(f"🔍 Matching ISO with server...")
 
-                        # Register with server
-                        if API_KEY:
-                            await register_iso_with_server(
-                                iso_id=iso_id,
-                                platform="pixeldrain",
-                                file_id=file_id,
-                                download_url=download_url,
-                                name=filename,
-                                size=final_size
-                            )
+                        match_result = await auto_match_iso_with_server(
+                            file_name=filename,
+                            file_size=final_size,
+                            platform="pixeldrain",
+                            file_id=file_id,
+                            download_url=download_url
+                        )
 
                         # Calculate average speed
                         if elapsed > 0:
@@ -544,17 +549,35 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         else:
                             speed_text = "N/A"
 
-                        await msg.edit_text(
-                            f"✅ Upload complete!\n\n"
-                            f"📄 {filename}\n"
-                            f"📏 {format_size(final_size)}\n"
-                            f"⚡ Speed: {speed_text}\n"
-                            f"⏱️ Time: {elapsed:.1f}s\n\n"
-                            f"🌐 Platform: PIXELDRAIN\n"
-                            f"🆔 ID: {file_id}\n\n"
-                            f"🔗 {view_url}\n\n"
-                            f"Registered: {iso_id}"
-                        )
+                        if match_result.get("success") and match_result.get("iso_id"):
+                            iso_id = match_result["iso_id"]
+                            iso_info = match_result.get("iso_info", {})
+
+                            await msg.edit_text(
+                                f"✅ Upload complete!\n\n"
+                                f"📄 {filename}\n"
+                                f"📏 {format_size(final_size)}\n"
+                                f"⚡ Speed: {speed_text}\n"
+                                f"⏱️ Time: {elapsed:.1f}s\n\n"
+                                f"🎯 Matched: {iso_info.get('name', 'Unknown')} {iso_info.get('version', '')}\n"
+                                f"💿 Architecture: {iso_info.get('architecture', 'N/A')}\n\n"
+                                f"🌐 Platform: PIXELDRAIN\n"
+                                f"🆔 ISO ID: {iso_id}\n"
+                                f"🔗 {view_url}\n\n"
+                                f"Ready for download!"
+                            )
+                        else:
+                            await msg.edit_text(
+                                f"✅ Upload complete!\n\n"
+                                f"📄 {filename}\n"
+                                f"📏 {format_size(final_size)}\n"
+                                f"⚡ Speed: {speed_text}\n"
+                                f"⏱️ Time: {elapsed:.1f}s\n\n"
+                                f"🌐 Platform: PIXELDRAIN\n"
+                                f"🆔 ID: {file_id}\n"
+                                f"🔗 {view_url}\n\n"
+                                f"⚠️ Could not auto-match this file to any ISO."
+                            )
 
                         logger.info(f"Fetched from URL and uploaded to PixelDrain: {filename} ({speed_text}, {elapsed:.1f}s)")
                     else:
