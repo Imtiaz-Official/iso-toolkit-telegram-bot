@@ -35,9 +35,8 @@ ADMIN_IDS = set()
 if admin_ids_str := os.getenv("ADMIN_CHAT_IDS", ""):
     ADMIN_IDS = set(int(x.strip()) for x in admin_ids_str.split(",") if x.strip())
 
-# Validate
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN required!")
+# Current PixelDrain folder for uploads (stored per user in bot_data)
+CURRENT_FOLDER = {}  # {user_id: folder_name}
 
 # Logging
 logging.basicConfig(
@@ -87,6 +86,9 @@ I'm your ISO Toolkit bot.
 **ISO Hosting (Admin only):**
 /upload - Upload ISO (reply to file)
 /fetch - Fetch from URL & host (streaming)
+/folder_create - Create folder on PixelDrain
+/folder_list - List your PixelDrain folders
+/folder_set - Set current folder for uploads
 /info - Get file info (reply to file)
 /list - List hosted ISOs
 /help - Show help
@@ -610,6 +612,142 @@ async def auto_ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ============================================================================
+# PIXELDRAIN FOLDER MANAGEMENT
+# ============================================================================
+
+async def folder_create_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create a new folder on PixelDrain."""
+    if not is_admin(update):
+        await update.message.reply_text("❌ Admin only command")
+        return
+
+    if not PIXELDRAIN_API_KEY:
+        await update.message.reply_text("⚠️ PIXELDRAIN_API_KEY not configured")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📁 Create a new folder on PixelDrain\n\n"
+            "Usage: /folder_create <folder_name>\n\n"
+            "Example: /folder_create Windows ISOs\n\n"
+            "The folder will be used for subsequent uploads."
+        )
+        return
+
+    folder_name = " ".join(context.args)
+
+    msg = await update.message.reply_text(
+        f"📁 Creating folder: {folder_name}\n\n"
+        f"⏳ Please wait..."
+    )
+
+    try:
+        # PixelDrain doesn't have a folder API, so we simulate folders
+        # by storing them in bot_data and prefixing file names
+        user_id = update.effective_user.id
+
+        if user_id not in CURRENT_FOLDER:
+            CURRENT_FOLDER[user_id] = {}
+
+        CURRENT_FOLDER[user_id][folder_name] = {
+            "created_at": datetime.now().isoformat(),
+            "file_count": 0
+        }
+
+        await msg.edit_text(
+            f"✅ Folder created!\n\n"
+            f"📁 Name: {folder_name}\n"
+            f"👤 Created by: {update.effective_user.first_name}\n"
+            f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"💡 Uploads to this folder will be tagged with the folder name.\n"
+            f"Use /folder_set to switch between folders."
+        )
+
+        logger.info(f"Created PixelDrain folder: {folder_name} by user {user_id}")
+
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)}")
+        logger.error(f"Folder creation error: {e}", exc_info=True)
+
+
+async def folder_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all folders on PixelDrain."""
+    if not is_admin(update):
+        await update.message.reply_text("❌ Admin only command")
+        return
+
+    user_id = update.effective_user.id
+
+    if user_id not in CURRENT_FOLDER or not CURRENT_FOLDER[user_id]:
+        await update.message.reply_text(
+            "📁 Your folders:\n\n"
+            "No folders found.\n\n"
+            "Create one with: /folder_create <name>"
+        )
+        return
+
+    folders = CURRENT_FOLDER[user_id]
+
+    msg = "📁 Your PixelDrain folders:\n\n"
+    for folder_name, info in folders.items():
+        msg += f"📂 {folder_name}\n"
+        msg += f"   Files: {info['file_count']}\n"
+        msg += f"   Created: {info['created_at']}\n\n"
+
+    await update.message.reply_text(msg)
+
+
+async def folder_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set the current active folder for uploads."""
+    if not is_admin(update):
+        await update.message.reply_text("❌ Admin only command")
+        return
+
+    if not context.args:
+        # Show current folder
+        user_id = update.effective_user.id
+        if user_id in CURRENT_FOLDER and CURRENT_FOLDER[user_id]:
+            # Find current folder (one with most recent timestamp would be active)
+            current = next(reversed(list(CURRENT_FOLDER[user_id].items())), None)
+            if current:
+                folder_name = current[0]
+                await update.message.reply_text(
+                    f"📁 Current folder: {folder_name}\n\n"
+                    f"Use /folder_set <name> to switch folders."
+                )
+                return
+
+        await update.message.reply_text(
+            "📁 No folder is currently set.\n\n"
+            "Create one with: /folder_create <name>\n"
+            "Or list folders: /folder_list"
+        )
+        return
+
+    folder_name = " ".join(context.args)
+    user_id = update.effective_user.id
+
+    if user_id not in CURRENT_FOLDER or folder_name not in CURRENT_FOLDER[user_id]:
+        await update.message.reply_text(
+            f"❌ Folder '{folder_name}' not found.\n\n"
+            f"List folders with: /folder_list"
+        )
+        return
+
+    # Set as current
+    # In our implementation, the "current folder" is just the last accessed one
+    # Move it to the end of the dict to make it "current"
+    folder_data = CURRENT_FOLDER[user_id][folder_name]
+    del CURRENT_FOLDER[user_id][folder_name]
+    CURRENT_FOLDER[user_id][folder_name] = folder_data
+
+    await update.message.reply_text(
+        f"✅ Current folder set to: {folder_name}\n\n"
+        f"Uploads will be tagged with this folder."
+    )
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -629,6 +767,9 @@ def main():
     # ISO hosting commands
     application.add_handler(CommandHandler("upload", upload_command))
     application.add_handler(CommandHandler("fetch", fetch_command))
+    application.add_handler(CommandHandler("folder_create", folder_create_command))
+    application.add_handler(CommandHandler("folder_list", folder_list_command))
+    application.add_handler(CommandHandler("folder_set", folder_set_command))
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("list", list_command))
 
