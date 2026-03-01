@@ -31,6 +31,12 @@ API_KEY = os.getenv("API_KEY", "")
 PIXELDRAIN_API_KEY = os.getenv("PIXELDRAIN_API_KEY", "")
 PING_INTERVAL = 600  # 10 minutes
 
+# URLs to keep alive
+PING_TARGETS = [
+    TARGET_URL,
+    "https://modringsbot.onrender.com/"
+]
+
 # ============================================================================
 # ACCESS CONTROL
 # ============================================================================
@@ -58,12 +64,12 @@ logger = logging.getLogger(__name__)
 # KEEP-ALIVE FUNCTIONS (Original)
 # ============================================================================
 
-async def ping_site() -> tuple[bool, str, int]:
+async def ping_site(url: str) -> tuple[bool, str, int]:
     """Ping target site. Returns (success, message, status_code)."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                TARGET_URL,
+                url,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 return True, "Site is online", response.status
@@ -112,7 +118,7 @@ I'm your ISO Toolkit bot.
 /deny <user_id> - Revoke access from a user
 /users - List all authorized users
 
-⏰ Auto-ping every 10 min.
+⏰ Auto-ping {len(PING_TARGETS)} sites every 10 min.
 """
     await update.message.reply_text(msg)
 
@@ -122,23 +128,20 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not is_authorized(update, context):
         return  # Silently ignore
 
-    msg = await update.message.reply_text("🔍 Checking...")
+    msg = await update.message.reply_text("🔍 Checking sites...")
 
-    success, message, status_code = await ping_site()
+    results = []
+    for url in PING_TARGETS:
+        success, message, status_code = await ping_site(url)
+        if success:
+            results.append(f"✅ {url}\nStatus: {message}\nHTTP: {status_code}")
+        else:
+            results.append(f"❌ {url}\nError: {message}")
 
-    if success:
-        await msg.edit_text(
-            f"✅ {TARGET_URL}\n"
-            f"Status: {message}\n"
-            f"HTTP: {status_code}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S')}"
-        )
-    else:
-        await msg.edit_text(
-            f"❌ {TARGET_URL}\n"
-            f"Error: {message}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S')}"
-        )
+    await msg.edit_text(
+        "\n\n".join(results) + 
+        f"\n\nTime: {datetime.now().strftime('%H:%M:%S')}"
+    )
 
 
 # ============================================================================
@@ -689,17 +692,19 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def auto_ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background auto-ping job."""
-    logger.info("Running auto-ping...")
-    success, message, status_code = await ping_site()
-
+    logger.info(f"Running auto-ping for {len(PING_TARGETS)} targets...")
+    
     stats = context.bot_data.get('stats', {'total': 0, 'success': 0, 'failed': 0})
-    stats['total'] += 1
-    if success:
-        stats['success'] += 1
-        logger.info(f"✅ Auto-ping successful: HTTP {status_code}")
-    else:
-        stats['failed'] += 1
-        logger.warning(f"❌ Auto-ping failed: {message}")
+    
+    for url in PING_TARGETS:
+        success, message, status_code = await ping_site(url)
+        stats['total'] += 1
+        if success:
+            stats['success'] += 1
+            logger.info(f"✅ Auto-ping successful for {url}: HTTP {status_code}")
+        else:
+            stats['failed'] += 1
+            logger.warning(f"❌ Auto-ping failed for {url}: {message}")
 
     context.bot_data['stats'] = stats
 

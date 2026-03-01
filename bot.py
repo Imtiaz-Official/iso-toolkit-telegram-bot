@@ -28,6 +28,12 @@ API_URL = os.getenv("API_URL", "https://iso-toolkit.onrender.com/api")
 API_KEY = os.getenv("API_KEY", "")  # API key for authentication
 PING_INTERVAL = 600  # 10 minutes in seconds
 
+# URLs to keep alive
+PING_TARGETS = [
+    TARGET_URL,
+    "https://modringsbot.onrender.com/"
+]
+
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError(
@@ -49,7 +55,7 @@ if admin_ids_str := os.getenv("ADMIN_CHAT_IDS", ""):
     ADMIN_IDS = set(int(x.strip()) for x in admin_ids_str.split(",") if x.strip())
 
 
-async def ping_site() -> tuple[bool, str, int]:
+async def ping_site(url: str) -> tuple[bool, str, int]:
     """
     Ping the target site and return status.
     Returns: (success, message, status_code)
@@ -57,7 +63,7 @@ async def ping_site() -> tuple[bool, str, int]:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                TARGET_URL,
+                url,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 return (
@@ -95,95 +101,84 @@ I'm your ISO Toolkit bot.
 {'/info - Get ISO file info (reply to file)' if is_admin else ''}
 /help - Show this help message
 
-⏰ I'll automatically ping the site every 10 minutes to keep it alive.
+⏰ I'll automatically ping {len(PING_TARGETS)} sites every 10 minutes to keep them alive.
     """
     await update.message.reply_text(welcome_message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show help message."""
-    help_text = """
+    help_text = f"""
 🤖 Available Commands:
 
-/check - Check if site is online
-/wake - Wake up the site
+/check - Check if sites are online
+/wake - Wake up the sites
 /status - Show current bot and site status
 /stats - Show ping statistics
 /help - Show this help message
 
-The bot automatically pings the site every 10 minutes to prevent Render from spinning it down.
+The bot automatically pings {len(PING_TARGETS)} sites every 10 minutes to prevent Render from spinning them down.
     """
     await update.message.reply_text(help_text)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check if the site is online."""
+    """Check if the sites are online."""
     msg = await update.message.reply_text("🔍 Checking site status...")
 
-    success, message, status_code = await ping_site()
+    results = []
+    for url in PING_TARGETS:
+        success, message, status_code = await ping_site(url)
+        if success:
+            results.append(f"✅ {url}\nStatus: {message}\nHTTP Code: {status_code}")
+        else:
+            results.append(f"❌ {url}\nError: {message}")
 
-    if success:
-        await msg.edit_text(
-            f"✅ {TARGET_URL}\n"
-            f"Status: {message}\n"
-            f"HTTP Code: {status_code}\n"
-            f"Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-    else:
-        await msg.edit_text(
-            f"❌ {TARGET_URL}\n"
-            f"Error: {message}\n"
-            f"Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"💡 The site may be spinning up. Try again in 30 seconds."
-        )
+    await msg.edit_text(
+        "\n\n".join(results) + 
+        f"\n\nChecked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
 
 async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Wake up the site by pinging it."""
-    msg = await update.message.reply_text("⏰ Waking up the site...")
+    """Wake up the sites by pinging them."""
+    msg = await update.message.reply_text("⏰ Waking up sites...")
 
-    # First ping to wake it up
-    success1, message1, code1 = await ping_site()
-
-    if success1:
-        await msg.edit_text(
-            f"✅ Site is awake!\n"
-            f"{TARGET_URL}\n"
-            f"HTTP: {code1}\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S')}"
-        )
-    else:
-        # Wait a bit and try again
-        await asyncio.sleep(5)
-        success2, message2, code2 = await ping_site()
-
-        if success2:
-            await msg.edit_text(
-                f"✅ Site is now awake!\n"
-                f"{TARGET_URL}\n"
-                f"HTTP: {code2}\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
-            )
+    results = []
+    for url in PING_TARGETS:
+        success1, message1, code1 = await ping_site(url)
+        if success1:
+            results.append(f"✅ {url} is awake (HTTP {code1})")
         else:
-            await msg.edit_text(
-                f"❌ Failed to wake site\n"
-                f"Error: {message2}\n"
-                f"💡 Site may be down. Check Render dashboard."
-            )
+            # Wait a bit and try again
+            await asyncio.sleep(2)
+            success2, message2, code2 = await ping_site(url)
+            if success2:
+                results.append(f"✅ {url} is now awake (HTTP {code2})")
+            else:
+                results.append(f"❌ Failed to wake {url}: {message2}")
+
+    await msg.edit_text(
+        "Wake result:\n\n" + 
+        "\n".join(results) + 
+        f"\n\nTime: {datetime.now().strftime('%H:%M:%S')}"
+    )
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot status."""
-    success, message, status_code = await ping_site()
-
     status_text = f"""
 🤖 Bot Status:
 ━━━━━━━━━━━━━━━━
-Target: {TARGET_URL}
+Targets ({len(PING_TARGETS)}):
+"""
+    for url in PING_TARGETS:
+        success, _, _ = await ping_site(url)
+        status_text += f"{'🟢' if success else '🔴'} {url}\n"
+
+    status_text += f"""
 Auto-ping: Every 10 minutes
 ━━━━━━━━━━━━━━━━
-Current Status: {'🟢 Online' if success else '🔴 Offline'}
-HTTP Code: {status_code if status_code else 'N/A'}
 Last Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     """
     await update.message.reply_text(status_text)
@@ -203,41 +198,41 @@ Total Pings: {stats['total']}
 Successful: {stats['success']} ✅
 Failed: {stats['failed']} ❌
 Success Rate: {success_rate:.1f}%
-Uptime: {'🟢 Good' if stats['failed'] < stats['total'] * 0.1 else '🟡 Check dashboard'}
+Uptime: {'🟢 Good' if stats['failed'] < stats['total'] * 0.1 else '🟡 Check targets'}
     """
     await update.message.reply_text(stats_text)
 
 
 async def auto_ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Background job that pings the site every 10 minutes.
+    Background job that pings the sites every 10 minutes.
     """
-    logger.info("Running auto-ping...")
-    success, message, status_code = await ping_site()
-
-    # Update stats
+    logger.info(f"Running auto-ping for {len(PING_TARGETS)} targets...")
+    
     stats = context.bot_data.get('stats', {'total': 0, 'success': 0, 'failed': 0})
-    stats['total'] += 1
-    if success:
-        stats['success'] += 1
-        logger.info(f"✅ Auto-ping successful: HTTP {status_code}")
-    else:
-        stats['failed'] += 1
-        logger.warning(f"❌ Auto-ping failed: {message}")
+    
+    for url in PING_TARGETS:
+        success, message, status_code = await ping_site(url)
+        stats['total'] += 1
+        if success:
+            stats['success'] += 1
+            logger.info(f"✅ Auto-ping successful for {url}: HTTP {status_code}")
+        else:
+            stats['failed'] += 1
+            logger.warning(f"❌ Auto-ping failed for {url}: {message}")
+
+            # Send notification to owner if failed
+            try:
+                owner_chat_id = os.getenv('OWNER_CHAT_ID')
+                if owner_chat_id:
+                    await context.bot.send_message(
+                        chat_id=owner_chat_id,
+                        text=f"⚠️ Auto-ping failed for {url}!\n\nError: {message}\n\nSite may be down."
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send alert for {url}: {e}")
 
     context.bot_data['stats'] = stats
-
-    # Send notification to owner if failed
-    if not success:
-        try:
-            owner_chat_id = os.getenv('OWNER_CHAT_ID')
-            if owner_chat_id:
-                await context.bot.send_message(
-                    chat_id=owner_chat_id,
-                    text=f"⚠️ Auto-ping failed!\n\nError: {message}\n\nSite may be down. Check Render dashboard."
-                )
-        except Exception as e:
-            logger.error(f"Failed to send alert: {e}")
 
 
 def main() -> None:
